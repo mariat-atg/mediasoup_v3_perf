@@ -13,123 +13,178 @@ namespace RTC
 
 	// 17: 16 bit mask + the initial sequence number.
 	static constexpr size_t MaxRequestedPackets{ 17 };
-	static std::vector<uint16_t> RetransmissionContainer(MaxRequestedPackets + 1); // sequence ids of packets
 	// Don't retransmit packets older than this (ms).
 	static constexpr uint32_t MaxRetransmissionDelay{ 2000 };
 	static constexpr uint32_t DefaultRtt{ 100 };
 
-  /* RtpStreamSend::Buffer methods */
+	/* Instance methods. */
 
-  // Access the first item in array
-	const RtpStreamSend::BufferItem& RtpStreamSend::Buffer::first() const
-	{ 
-		MS_ASSERT(vctr.size() > 0 && maxsize > 0 && cursize > 0, "Read first() from empty Buffer");
-		return vctr[start];
-	}
-	
-	// Access the last item in array
-	const RtpStreamSend::BufferItem& RtpStreamSend::Buffer::last() const
+	const RtpStreamSend::BufferItem& RtpStreamSend::Buffer::First() const
 	{
-		MS_ASSERT(vctr.size() > 0 && maxsize > 0  && cursize > 0, "Read last() from empty Buffer");
-		return vctr[(start + cursize) % vctr.size()]; 
+		MS_TRACE();
+
+		MS_ASSERT(
+		  this->vctr.size() > 0 && this->maxSize > 0 && this->currentSize > 0,
+		  "Must not read First() from empty Buffer");
+
+		return this->vctr[this->startIdx];
 	}
 
-	// Access an item in vctr[] by index relative to start.
-	RtpStreamSend::BufferItem& RtpStreamSend::Buffer::operator[] (size_t index)
+	const RtpStreamSend::BufferItem& RtpStreamSend::Buffer::Last() const
 	{
-		MS_ASSERT(index <= maxsize, "index out of vector maxsize capacity");
-		
-		auto idx = vctr.empty() ? start + index : (start + index) % vctr.size();
-		return vctr[idx];
+		MS_TRACE();
+
+		MS_ASSERT(
+		  this->vctr.size() > 0 && this->maxSize > 0 && this->currentSize > 0,
+		  "Must not read Last() from empty Buffer");
+
+		return this->vctr[(this->startIdx + this->currentSize) % this->vctr.size() - 1];
 	}
 
-	// Access an item in vctr[] by packet's sequence id - if it present
-	RtpStreamSend::BufferItem* RtpStreamSend::Buffer::getbyseq(uint16_t seq)
+	RtpStreamSend::BufferItem& RtpStreamSend::Buffer::operator[](size_t idx)
 	{
-		if (vctr.empty()) return nullptr;
+		MS_TRACE();
 
-		for (size_t idx = 0; idx < cursize; idx++)
+		MS_ASSERT(idx <= this->maxSize, "idx out of vector maxSize capacity");
+
+		idx = this->vctr.empty() ? this->startIdx + idx : (this->startIdx + idx) % this->vctr.size();
+
+		return this->vctr[idx];
+	}
+
+	RtpStreamSend::BufferItem* RtpStreamSend::Buffer::GetBySeq(uint16_t seq)
+	{
+		MS_TRACE();
+
+		if (this->vctr.empty())
+			return nullptr;
+
+		for (size_t idx{ 0 }; idx < this->currentSize; ++idx)
 		{
-			auto currentSeq = (*this)[idx-1].seq;
-			if (seq == currentSeq) {
-				return &((*this)[idx]);
-			}
+			auto currentSeq = (*this)[idx].seq;
+			if (seq == currentSeq)
+				return std::addressof((*this)[idx]);
 		}
 
 		return nullptr;
 	}
 
-	// Add new item at the end, if there is room
-	bool RtpStreamSend::Buffer::push_back(const RtpStreamSend::BufferItem& val)
+	bool RtpStreamSend::Buffer::PushBack(const RtpStreamSend::BufferItem& item)
 	{
-		// can't insert, no room in array
-		if (cursize >= maxsize + 1)
+		MS_TRACE();
+
+		// No room.
+		if (this->currentSize > this->maxSize)
 			return false;
-		
-		auto idx = vctr.empty() ? start : (start + cursize) % vctr.size();
-		vctr[idx] = val;
-		cursize++;
+
+		auto idx = this->vctr.empty() ? this->startIdx
+		                              : (this->startIdx + this->currentSize) % this->vctr.size();
+
+		this->vctr[idx] = item;
+		this->currentSize++;
 
 		return true;
 	}
 
-	// Remove the first item from array
-	void RtpStreamSend::Buffer::trim_front()
+	void RtpStreamSend::Buffer::TrimFront()
 	{
-		if (empty())
+		MS_TRACE();
+
+		if (Empty())
 			return;
-		
-		(*this)[start].packet = nullptr;
-		start = (start + 1) % vctr.size();
-		cursize--;
+
+		this->vctr[this->startIdx].packet = nullptr;
+		this->startIdx                    = (this->startIdx + 1) % this->vctr.size();
+		this->currentSize--;
 	}
 
-	// Inserts data into a buffer so newer packets with higher BufferItem::seq placed are at the end
-	// Returns a pointer to newly added item, or nullptr if packet with the same seq was already stored
-	RtpStreamSend::BufferItem* RtpStreamSend::Buffer::ordered_insert_by_seq(const RtpStreamSend::BufferItem& val)
+	RtpStreamSend::BufferItem* RtpStreamSend::Buffer::OrderedInsertBySeq(
+	  const RtpStreamSend::BufferItem& item)
 	{
-		MS_ASSERT(cursize <= maxsize, "Buffer exceeded max capacity, must trim it prior to inserting new items");
-		MS_ASSERT(cursize > 0, "ordered_insert_by_seq should only be called when there is at least one item in array");
+		MS_TRACE();
 
-		// idx is a position of the "hole" between array elements. 
-		// Inserted packets will be put in there
-		size_t idx = cursize;
-		auto packetSeq = val.seq;
-		RtpStreamSend::BufferItem* retItem = { nullptr };
+		MS_ASSERT(
+		  this->currentSize <= this->maxSize,
+		  "Buffer exceeded max capacity, must trim it prior to inserting new items");
+		MS_ASSERT(
+		  this->currentSize > 0, "should only be called when there is at least one item the Buffer");
 
-		// First, insert new packet in buffer array unless already stored.
-		// Later we will check if buffer array went beyond max capacity and in that case remove the oldest packet
-		for (; idx > 0; idx--)
+		// idx is a position of the "hole" between vector elements. Inserted packets
+		// will be put in there.
+		size_t idx     = this->currentSize;
+		auto packetSeq = item.seq;
+		RtpStreamSend::BufferItem* retItem{ nullptr };
+
+		// First, insert new packet in the vector unless already stored. Later we will
+		// check if vector went beyond max capacity and in that case remove the oldest
+		// packet.
+		for (; idx > 0; --idx)
 		{
-			auto currentSeq = (*this)[idx-1].seq;
+			// TODO: Why idx - 1?
+			auto currentSeq = (*this)[idx - 1].seq;
 
-			// Packet is already stored, nothing to do but shift all items back to the left
-			if (packetSeq == currentSeq) {
-				for (auto j = idx; j < cursize; j++ ) {	// j indicates the location of a "hole" slot, we want to move the "hole" to the very right position
-					(*this)[j] = (*this)[j + 1];
+			// Packet is already stored, nothing to do but shift all items back to the
+			// left.
+			if (packetSeq == currentSeq)
+			{
+				MS_ERROR("--- duplicated packet, seq:%" PRIu16 ", idx:%zu", packetSeq, idx);
+
+				// j indicates the location of a "hole" slot, we want to move the "hole"
+				// to the very right position.
+				for (size_t j{ idx }; j < this->currentSize; ++j)
+				{
+					(*this)[j]            = (*this)[j + 1];
 					(*this)[j + 1].packet = nullptr;
 				}
+
 				break;
 			}
 
 			if (RTC::SeqManager<uint16_t>::IsSeqHigherThan(packetSeq, currentSeq))
 			{
-				// insert here.
-				(*this)[idx] = val;
-				retItem = &((*this)[idx]);
+				MS_ERROR("--- storing item, seq:%" PRIu16 ", idx:%zu", packetSeq, idx);
+
+				// Insert here.
+				(*this)[idx] = item;
+				this->currentSize++;
+
+				retItem = std::addressof((*this)[idx]);
+
 				break;
 			}
 
-			// Shift current buffer item into an empty slot on the right, so the "hole" moves to the left
-			// Then either we insert a new packet in place of "hole" on the next iteration, or will iterate further
-			(*this)[idx] = (*this)[idx - 1];
+			// Shift current item into an empty slot on the right so the "hole" moves
+			// to the left. Then either we insert a new packet in place of "hole" on
+			// the next iteration or will iterate further.
+			(*this)[idx]            = (*this)[idx - 1];
 			(*this)[idx - 1].packet = nullptr;
-		}
 
+			// Special case: we want to insert the oldest packet in the first position
+			// unless doing this will put buffer over capacity,
+			// then we do nothing but ensure that "hole" is back to the very right.
+			if (idx == 1)
+			{
+				if (this->currentSize < this->maxSize)
+				{
+					MS_ERROR("--- adding item in front, seq:%" PRIu16, packetSeq);
+					// Insert in front
+					this->startIdx = this->vctr.empty() ? this->startIdx
+		                              : (this->startIdx - 1) % this->vctr.size();
+
+					this->vctr[this->startIdx] = item;
+					this->currentSize++;
+
+					retItem = std::addressof((*this)[0]);
+
+					break;
+				}
+				else {
+					this->startIdx = (this->startIdx + 1) % this->vctr.size();
+				}
+			}
+		}
 		return retItem;
 	}
-
-	/* Instance methods. */
 
 	RtpStreamSend::RtpStreamSend(
 	  RTC::RtpStreamSend::Listener* listener, RTC::RtpStream::Params& params, size_t bufferSize)
@@ -198,13 +253,24 @@ namespace RTC
 
 			this->nackPacketCount += item->CountRequestedPackets();
 
-			FillRetransmissionContainer(item->GetPacketId(), item->GetLostPacketBitmask());
+			// Container to be filled with the sequence numbers of packets to be
+			// retransmitted.
+			// TODO: if new packets are not inserted into this->buffer between a call to FillRetransmissionContainer and packets retransmission,
+			// seqs vector can contain memory locations to BufferItem instead of seq ids, making GetBySeq() obsolete.
+			std::vector<uint16_t> seqs;
 
-			for (auto seqid : RetransmissionContainer)
+			seqs.reserve(MaxRequestedPackets + 1);
+
+			FillRetransmissionContainer(item->GetPacketId(), item->GetLostPacketBitmask(), seqs);
+
+				MS_ERROR("--- seqs.size():%zu", seqs.size());
+
+			for (auto seq : seqs)
 			{
-				auto* bufferItem = this->buffer.getbyseq(seqid);
-				if (bufferItem == nullptr)
-					break;
+				auto* bufferItem = this->buffer.GetBySeq(seq);
+
+				// TODO: Temporal.
+				MS_ASSERT(bufferItem != nullptr, "bufferItem cannot be nullptr");
 
 				// Note that this is an already RTX encoded packet if RTX is used
 				// (FillRetransmissionContainer() did it).
@@ -341,21 +407,23 @@ namespace RTC
 		MS_TRACE();
 
 		// Delete cloned packets.
-		for (size_t idx = 0; idx < this->buffer.datasize(); idx++)
+		for (size_t idx{ 0 }; idx < this->buffer.GetSize(); ++idx)
 		{
 			delete this->buffer[idx].packet;
 		}
 
-		// Clear buffer list.
-		this->buffer.clear();
-		
-		//Clear storage list.
+		// Clear buffer.
+		this->buffer.Clear();
+
+		// Clear storage.
 		this->storage.clear();
 	}
 
 	void RtpStreamSend::StorePacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
+
+		MS_ERROR("packet->GetSequenceNumber():%" PRIu16, packet->GetSequenceNumber());
 
 		if (packet->GetSize() > RTC::MtuSize)
 		{
@@ -369,66 +437,88 @@ namespace RTC
 			return;
 		}
 
-		// Sum the packet seq number and the number of 16 bits cycles.
 		auto packetSeq = packet->GetSequenceNumber();
 		BufferItem bufferItem;
 
 		bufferItem.seq = packetSeq;
 
 		// If empty do it easy.
-		if (this->buffer.empty())
+		if (this->buffer.Empty())
 		{
+			MS_ERROR("buffer.Empty(), seq:%" PRIu16, bufferItem.seq);
+
 			auto store = this->storage[0].store;
 
 			bufferItem.packet = packet->Clone(store);
-			this->buffer.push_back(bufferItem);
+			this->buffer.PushBack(bufferItem);
 
-			return;
-		}
-
-		// Otherwise, do the stuff.
-		RtpStreamSend::BufferItem* newItem = this->buffer.ordered_insert_by_seq(bufferItem);
-
-		// Packet already stored, nothing to do
-		if (newItem == nullptr)
-		{
 			return;
 		}
 
 		uint8_t* store{ nullptr };
-		if (this->buffer.datasize() <= this->storage.size())
+
+		// Should first try inserting an item, and then trimming extra packet
+		// because OrderedInsertBySeq() does not guarantee to increate number of buffer items (duplicates).
+		// For this reason there is always an extra storage space for a single packet
+		auto* newItem = this->buffer.OrderedInsertBySeq(bufferItem);
+		if (newItem)
+			MS_ERROR("newItem.seq:%" PRIu16, newItem->seq);
+		else
+			MS_ERROR("newItem:nullptr");
+
+		// Packet already stored, nothing to do.
+		if (newItem == nullptr)
+			return;
+
+		if (this->buffer.GetSize() <= this->storage.size())
 		{
-			store = this->storage[this->buffer.datasize() - 1].store;
+			MS_ERROR("--- this->buffer.GetSize() <= this->storage.size()");
+
+			store = this->storage[this->buffer.GetSize() - 1].store;
 		}
 		else
 		{
-			// Otherwise remove the first packet of the buffer and replace its storage area.
-			MS_ASSERT(this->buffer.datasize() - 1  == this->storage.size(), "When buffer beyond max capacity storage should be exactly at full capacity");
-			auto* firstPacket = this->buffer.first().packet;
+			MS_ERROR("--- this->buffer.GetSize() > this->storage.size()");
+
+			// Otherwise remove the first oldest packet of the buffer and replace its storage area.
+			MS_ASSERT(
+			  this->buffer.GetSize() - 1 == this->storage.size(),
+			  "when buffer has just exceeded max capacity, storage should be exactly at full capacity");
+
+			auto* firstPacket = this->buffer.First().packet;
 
 			// Store points to the store used by the first packet.
 			store = const_cast<uint8_t*>(firstPacket->GetData());
+
 			// Free the first packet.
 			delete firstPacket;
-			// Remove the first element in the list.
-			this->buffer.trim_front();
+
+			// Remove the first element in the buffer.
+			this->buffer.TrimFront();
 		}
 
 		// Update the new buffer item so it points to the cloned packed.
 		newItem->packet = packet->Clone(store);
+
+
+		// TODO
+		MS_ERROR("<this->buffer.vctr>");
+		for (auto& item : this->buffer.vctr)
+		{
+			MS_ERROR("  item.seq:%" PRIu16, item.seq);
+		}
+		MS_ERROR("</this->buffer.vctr>");
 	}
 
 	// This method looks for the requested RTP packets and inserts them into the
-	// RetransmissionContainer vector (and sets to null the next position).
+	// given container.
 	//
 	// If RTX is used the stored packet will be RTX encoded now (if not already
 	// encoded in a previous resend).
-	void RtpStreamSend::FillRetransmissionContainer(uint16_t seq, uint16_t bitmask)
+	void RtpStreamSend::FillRetransmissionContainer(
+	  uint16_t seq, uint16_t bitmask, std::vector<uint16_t>& seqs)
 	{
 		MS_TRACE();
-
-		// Ensure the container's first element is 0.
-		RetransmissionContainer[0] = 0;
 
 		// If NACK is not supported, exit.
 		if (!this->params.useNack)
@@ -439,23 +529,34 @@ namespace RTC
 		}
 
 		// If the buffer is empty just return.
-		if (this->buffer.empty())
+		if (this->buffer.Empty())
 			return;
 
 		uint16_t firstSeq       = seq;
 		uint16_t lastSeq        = firstSeq + MaxRequestedPackets - 1;
-		uint16_t bufferFirstSeq = this->buffer.first().seq;
-		uint16_t bufferLastSeq  = this->buffer.last().seq;
+		uint16_t bufferFirstSeq = this->buffer.First().seq;
+		uint16_t bufferLastSeq  = this->buffer.Last().seq;
 
 		// Requested packet range not found.
+		// clang-format off
 		if (
-		  RTC::SeqManager<uint16_t>::IsSeqHigherThan(firstSeq, bufferLastSeq) ||
-		  RTC::SeqManager<uint16_t>::IsSeqLowerThan(lastSeq, bufferFirstSeq))
+			RTC::SeqManager<uint16_t>::IsSeqHigherThan(firstSeq, bufferLastSeq) ||
+			RTC::SeqManager<uint16_t>::IsSeqLowerThan(lastSeq, bufferFirstSeq)
+		)
+		// clang-format on
 		{
 			MS_WARN_TAG(
 			  rtx,
-			  "requested packet range not in the buffer [seq:%" PRIu16 ", bufferFirstseq:%" PRIu16
-			  ", bufferLastseq:%" PRIu16 "]",
+			  "requested packet range not in the buffer [seq:%" PRIu16 ", bufferFirstSeq:%" PRIu16
+			  ", bufferLastSeq:%" PRIu16 "]",
+			  seq,
+			  bufferFirstSeq,
+			  bufferLastSeq);
+
+			// TODO
+			MS_ERROR(
+			  "requested packet range not in the buffer [seq:%" PRIu16 ", bufferFirstSeq:%" PRIu16
+			  ", bufferLastSeq:%" PRIu16 "]",
 			  seq,
 			  bufferFirstSeq,
 			  bufferLastSeq);
@@ -467,7 +568,6 @@ namespace RTC
 		uint64_t now = DepLibUV::GetTime();
 		uint16_t rtt = (this->rtt != 0u ? this->rtt : DefaultRtt);
 		bool requested{ true };
-		size_t containerIdx{ 0 };
 
 		// Some variables for debugging.
 		uint16_t origBitmask = bitmask;
@@ -483,15 +583,17 @@ namespace RTC
 
 			if (requested)
 			{
-				size_t idx = 0;
-				for (; idx < this->buffer.datasize(); idx++)
+				for (size_t idx{ 0 }; idx < this->buffer.GetSize(); ++idx)
 				{
+					MS_ERROR("_____(iterating buffer)______ idx:%zu, buffer.GetSize():%zu", idx, this->buffer.GetSize());
+
 					auto currentSeq = this->buffer[idx].seq;
 
 					// Found.
 					if (currentSeq == seq)
 					{
 						auto* currentPacket = this->buffer[idx].packet;
+
 						// Calculate how the elapsed time between the max timestampt seen and
 						// the requested packet's timestampt (in ms).
 						uint32_t diffTs = this->maxPacketTs - currentPacket->GetTimestamp();
@@ -541,8 +643,10 @@ namespace RTC
 							this->buffer[idx].rtxEncoded = true;
 						}
 
-						// Store the buffer item in the container and then increment its index.
-						RetransmissionContainer[containerIdx++] = this->buffer[idx].seq;
+						MS_ERROR("seqs.push_back(), seq:%" PRIu16 ", idx:%zu", this->buffer[idx].seq, idx);
+
+						// Store the buffer item in the given seq numbers container.
+						seqs.push_back(this->buffer[idx].seq);
 
 						// Save when this packet was resent.
 						this->buffer[idx].resentAtTime = now;
@@ -579,7 +683,7 @@ namespace RTC
 			}
 		}
 
-		// If not all the requested packets were sent, log it.
+		// If not all the requested packets was sent, log it.
 		if (!firstPacketSent || origBitmask != sentBitmask)
 		{
 			MS_DEBUG_TAG(
@@ -600,9 +704,6 @@ namespace RTC
 			  seq,
 			  MS_UINT16_TO_BINARY(origBitmask));
 		}
-
-		// Set the next container element to null.
-		RetransmissionContainer[containerIdx] = 0;
 	}
 
 	void RtpStreamSend::UpdateScore(RTC::RTCP::ReceiverReport* report)
